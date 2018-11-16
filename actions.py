@@ -1,10 +1,24 @@
+from __future__ import print_function
+import warnings
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+warnings.filterwarnings("ignore", category=RuntimeWarning)
+warnings.filterwarnings("ignore", category=FutureWarning)
+
+
 import pandas as pd
 import pickle as pickle
 import numpy as np
 import pypyodbc as odbc
 from scipy import stats
 
-
+from sklearn.pipeline import Pipeline, FeatureUnion
+from sklearn.model_selection import GridSearchCV
+from sklearn.svm import SVC
+from sklearn.datasets import load_iris
+from sklearn.decomposition import PCA
+from sklearn.feature_selection import SelectKBest
+from sklearn.preprocessing import Imputer
+from sklearn.preprocessing import PolynomialFeatures    
 from sklearn.tree import _tree
 from sklearn import tree
 from sklearn import preprocessing
@@ -164,187 +178,43 @@ def compile_data(verbose=False):
     
     if verbose:
         data.to_csv('input_data.csv')
-    # normalize(data,verbose)    
+    normalize(data,verbose)    
 
 "_______________________BUILDING A MODEL TO PREDICT NEXT MONTHS SECTOR RETURNS_______________________"
 
-def converge_ml(trials,train_q=None,test_q=None):
+def converge_ml(trials,lookback,train_q,test_q):
 
-    x = pd.read_pickle('Xdatanormalized.p')
-    y = pd.read_pickle('Ydatanormalized.p')
+    stop = test_q
+    start = min([train_q])
+    preds = make_preds(start,stop,lookback)
 
-    #   remove sectors without lookback_months worth of training data
-    # full_data_sectors = list(x.PMSector1[(x.date_bom.isin(train_q))])
-    # full_data_sectors = dict((x,full_data_sectors.count(x)) for x in set(full_data_sectors))
-    # full_data_sectors = [x for x in full_data_sectors if full_data_sectors[x]==len(train_q)]
+    for tial in range(1,trials):
+        pred2 = make_preds(start,stop,lookback)
+        preds = pd.concat([pred2,preds]) 
 
-    x = x.merge(y,how='left',on=['PMSector1','date_bom'])
-    # x = x[x.PMSector1.isin(full_data_sectors)]
+    
+    final_df = preds.groupby(['PMSector1']).mean().reset_index()
 
-    holder_df=pd.DataFrame()
-
-    dates = list(set(x.date_bom))
-
-    train_x = x[x.date_bom.isin(train_q)]
-
-    ## Elimination of rogue data and scaling the TRT
-    ## NOT SURE ABOUT THESE
-    x = x[x['PMSector1']!='Hotel']
-    train_x = train_x.dropna(axis='columns')
-    train_x = train_x[(abs(train_x['trt'])<0.20)]
-
-    train_y = train_x['trt']
-    train_y = np.log(1+train_y)
-    train_x = train_x.drop(['trt'],axis=1)
-
-    test_x  = x[x.date_bom.isin([test_q])]
-    test_x = test_x[list(train_x.columns)]
-    test_x = test_x.dropna(axis='columns')
-
-    train_x = train_x[list(test_x.columns)]
-
-    ## Eliminating any unwanted variables
-    l = list(train_x.columns)
-    l = [a for a  in l if a not in ['trt','date_bom','PMSector1']]
-    summary_lcv = summary_rfr = summary_gbr = l
-
-    ## Preprocessing
-    sectors = test_x['PMSector1']
-    cols = [a for a  in list(test_x.columns) if a not in ['trt'
-                                                            ,'date_bom'
-                                                            ,'PMSector1'
-                                                            ,'pctaffochange1'
-                                                            ,'pctaffochange2'
-                                                            ,'pctaffochange3'
-                                                            ,'pctaffochange4'
-                                                            
-                                                            ]]
-    train_x = train_x[cols]
-    test_x = test_x[cols]
-
-    ##PCA
-    from sklearn.decomposition import PCA
-    n_components = min([len(cols),7])
-    pca = PCA(n_components=n_components)
-
-    ##Add back some originals
-    from sklearn.feature_selection import SelectKBest
-    selection = SelectKBest(k=2)
-
-    ##Add some interaction effects and polynomials
-    from sklearn.preprocessing import PolynomialFeatures
-    poly = PolynomialFeatures(3)
-
-    from sklearn.pipeline import FeatureUnion
-    combined_features = FeatureUnion([('pca',pca),('univ_select',selection),('poly',poly)])
-
-    processed_train_x = combined_features.fit(train_x, train_y).transform(train_x)
-    processed_test_x = combined_features.fit(train_x, train_y).transform(test_x)
-
-    for run in range(0,trials):
-       
-    # #       Random Forest Regressor ORIGINAL
-        regr = RandomForestRegressor(bootstrap=True, criterion='mse', max_depth=9,
-           max_features='auto', max_leaf_nodes=None,
-           min_impurity_decrease=1e-07, min_samples_leaf=2,
-           min_samples_split=2, min_weight_fraction_leaf=0.0,
-           n_estimators=91, n_jobs=1, oob_score=False, random_state=None,
-           verbose=0, warm_start=False)
-    #     # regr = RandomForestRegressor(bootstrap=True, criterion='mse', max_depth=12,
-    #     #    max_features='auto', max_leaf_nodes=None,
-    #     #    min_impurity_decrease=1e-07, min_samples_leaf=4,
-    #     #    min_samples_split=2, min_weight_fraction_leaf=0.0,
-    #     #    n_estimators=41, n_jobs=1, oob_score=False, random_state=None,
-    #     #    verbose=0, warm_start=False)
-
-    #     # x_train_rfr=train_x[summary_rfr]
-    #     # x_test_rfr =test_x[summary_rfr]
-
-        regr.fit(processed_train_x,train_y)
-        rfr_preds= regr.predict(processed_test_x)
-
-    #     #        Gradient Boosting Regressor
-        # gbr = GradientBoostingRegressor(alpha=0.9, criterion='friedman_mse', init=None,
-        #      learning_rate=0.1, loss='lad', max_depth=3, max_features=None,
-        #      max_leaf_nodes=None, min_impurity_decrease=1e-07,
-        #      min_samples_leaf=3, min_samples_split=2,
-        #      min_weight_fraction_leaf=0.0, n_estimators=300,
-        #      presort='auto', random_state=None, subsample=1.0, verbose=0,
-        #      warm_start=False)
-
-    #     # x_train_gbr=train_x[summary_gbr]
-    #     # x_test_gbr =test_x[summary_gbr]        
-
-        # gbr.fit(processed_train_x,train_y)
-        # gbr_preds=gbr.predict(processed_test_x)
-
-    #     #       Bagging Regressor
-    #     lcv = BaggingRegressor(base_estimator=None, bootstrap=True, bootstrap_features=True,
-    #              max_features=2, max_samples=1.0, n_estimators=100, n_jobs=1,
-    #              oob_score=False, random_state=None, verbose=0, warm_start=False)
-
-    #     # x_train_lcv = train_x[summary_lcv]
-    #     # x_test_lcv  = test_x[summary_lcv]
-
-    #     lcv.fit(processed_train_x,train_y)
-    #     lcv_preds=lcv.predict(processed_test_x)
-
-        #       ADA Regressor
-        ada = AdaBoostRegressor()
-        ada.fit(processed_train_x,train_y)
-        ada_preds=ada.predict(processed_test_x)
-
-        #       Combining and averaging all results
-        temp_df= pd.DataFrame({
-                                # 'lcv':[a for a in lcv_preds]
-                               'rfr':[a for a in rfr_preds]
-                               # ,'gbr':[a for a in gbr_preds]
-                               ,'ada':[a for a in ada_preds]
-                               })        
-
-        #       Appending the results of this trial to a dataframe
-        holder_df[run]=temp_df.mean(axis=1)
-
-    #   Averaging all predictions        
-    final_df = pd.DataFrame(holder_df.mean(axis=1),columns=['pred_trt'])
-    final_df = final_df.reset_index(drop=True)
-    final_df['PMSector1'] = list(sectors)
-    final_df['date_bom'] = test_q
     return(final_df)
 
 "____________CALCULATE TOTAL RETURNS OF BUY SELL SPREAD BASED ON ABOVE MODEL_________"
 
-def calc_trt(trials,picks,train_q = None,test_q=None):
-
-    x = pd.read_pickle('Xdatanormalized.p')
-    y = pd.read_pickle('Ydatanormalized.p')
+def calc_trt(trials,picks,lookback,train_q = None,test_q=None):
 
     buy_sects=pd.DataFrame()
     sell_sects=pd.DataFrame()
 
     #    predicted total return values
-    df_preds = converge_ml(trials,train_q,test_q)
-
-
-    #    actual total return values
-    y=pd.DataFrame(y)
-    y.columns = ['PMSector1','date_bom','actual_trt']
-
-    #    combining predicted total returns and actual total returns on their indexes
-    df_preds = df_preds.merge(y,how='left',on=['PMSector1','date_bom'])
-
-    #   combining the fields sector and date_bom with the above-created predicted and actual trt DF    
-    fields = x[['PMSector1','date_bom']]
-    df_preds = df_preds.merge(fields,how='left',on=['PMSector1','date_bom'])
+    df_preds = converge_ml(trials,lookback,train_q,test_q)
 
     #   sort by our predicted total returns descending (highest to lowest)
     df_preds = df_preds.sort_values(by='pred_trt',ascending=False)
     buys  = df_preds.iloc[0:picks]['actual_trt']
     buys  = np.mean(buys)
-    buy_recs = df_preds.iloc[0:picks][['date_bom','PMSector1','actual_trt']]
+    buy_recs = df_preds.iloc[0:picks][['PMSector1','actual_trt']]
     sells = df_preds.iloc[len(df_preds)-picks:len(df_preds)]['actual_trt']
     sells = np.mean(sells)
-    sell_recs = df_preds.iloc[len(df_preds)-picks:len(df_preds)][['date_bom','PMSector1','actual_trt']]
+    sell_recs = df_preds.iloc[len(df_preds)-picks:len(df_preds)][['PMSector1','actual_trt']]
     spread = buys-sells    
     # print(df_preds)
     print("BUY")
@@ -366,27 +236,21 @@ def forward_rounds(num_rounds,num_picks,lookback,start=None,stop=None):
     quarters.sort()
 
     results=list()
-    if start:
-        start = quarters.index(pd.to_datetime(start))
-        stop = quarters.index(pd.to_datetime(stop))
-    else:
-        start = len(quarters)-1
-        stop = lookback+1
+    if not start:
+        start = '2015-01-01'
+    if not stop:
+        stop = quarters[quarters.index(pd.to_datetime('2015-01-01'))+lookback]
 
-    for q in np.arange(start,stop,-1):
-        test_q = quarters[q]
-        if test_q>=pd.to_datetime('2012-12-01'):
-        # if test_q>=pd.to_datetime('2018-01-01'):            
-            pass
-        else:
-            break
-
-        train_q = quarters[q-lookback:q]
-        ml = calc_trt(num_rounds,num_picks,train_q,test_q)
+    q=1
+    while pd.to_datetime(stop)<max(quarters):
+        ml = calc_trt(num_rounds,num_picks,lookback,start,stop)
         results.append(ml)
-        print("testing "+str(test_q))
-        print("results after "+str(len(quarters)-q-1)+" months="+str(np.prod([x['spread']+1 for x in results])))
-        print("("+str(np.prod([x['spread']+1 for x in results])**(1/(len(quarters)-q-1)))+") per month")
+        print("testing "+str(stop))
+        print("results after "+str(q)+" months="+str(np.prod([x['spread']+1 for x in results])))
+        print("("+str(np.prod([x['spread']+1 for x in results])**(1/(q)))+") per month")
+        start = quarters[quarters.index(pd.to_datetime(start))+1]
+        stop = quarters[quarters.index(pd.to_datetime(stop))+1]
+        q+=1
 
 
     spread = [x['spread'] for x in results]
@@ -394,92 +258,86 @@ def forward_rounds(num_rounds,num_picks,lookback,start=None,stop=None):
     title = 'spread_results_hptesting'+str(lookback)+'.csv'
     spread.to_csv(title)
     buy_recs = pd.concat([x['buy_recs'] for x in results])
-    buy_recs.to_csv('buy_results_hptesting.csv')
+    # buy_recs.to_csv('buy_results_hptesting.csv')
     sell_recs = pd.concat([x['sell_recs'] for x in results])
-    sell_recs.to_csv('sell_results_hptesting.csv')
+    # sell_recs.to_csv('sell_results_hptesting.csv')
     full_ranks = pd.concat([x['ranks'] for x in results])
-    full_ranks.to_csv('full_rank_results_hptesting.csv')
+    # full_ranks.to_csv('full_rank_results_hptesting.csv')
 
-# fr = pd.read_csv('full_rank_results_hptesting.csv')
-# fr['relative_trt']=fr['actual_trt'].groupby(fr['date_bom']).transform('mean')
-# fr['relative_trt']=fr['actual_trt']-fr['relative_trt']
-# fr['ranks']=fr.groupby(['date_bom'])['pred_trt'].transform(lambda x: pd.qcut(x,3,labels=range(1,4)))
-# print(fr.groupby(['ranks'])['relative_trt'].mean())
-# results after 45 months=1.5877778612606486
-
-from sklearn.model_selection import TimeSeriesSplit
-X = pd.read_pickle('Xdatanormalized.p')
-y = pd.read_pickle('Ydatanormalized.p')
-quarters=list(set(X.date_bom))
-quarters.sort()
-splits = (len(quarters)-24)
-tscv = TimeSeriesSplit(max_train_size = 24,n_splits=splits)
-for train_index, test_index in tscv.split(quarters):
-    print("TRAIN:", train_index, "TEST:", test_index,quarters[test_index[0]])
-    # X_train, X_test = X[train_index], X[test_index]
-    # y_train, y_test = y[train_index], y[test_index]
+    # fr = pd.read_csv('full_rank_results_hptesting.csv')
+    # fr['relative_trt']=fr['actual_trt'].groupby(fr['date_bom']).transform('mean')
+    # fr['relative_trt']=fr['actual_trt']-fr['relative_trt']
+    # fr['ranks']=fr.groupby(['date_bom'])['pred_trt'].transform(lambda x: pd.qcut(x,3,labels=range(1,4)))
+    # print(fr.groupby(['ranks'])['relative_trt'].mean())
+    # results after 45 months=1.5877778612606486
 
 
-from __future__ import print_function
-from sklearn.pipeline import Pipeline, FeatureUnion
-from sklearn.model_selection import GridSearchCV
-from sklearn.svm import SVC
-from sklearn.datasets import load_iris
-from sklearn.decomposition import PCA
-from sklearn.feature_selection import SelectKBest
-from sklearn.preprocessing import Imputer
-from sklearn.preprocessing import PolynomialFeatures    
+def make_preds(start,stop,lookback):
+    X = pd.read_pickle('Xdatanormalized.p')
+    y = pd.read_pickle('Ydatanormalized.p')
+    X = X.merge(y,how='left',on=['PMSector1','date_bom'])
+    X = X.dropna(subset=['trt'])
 
-X = pd.read_pickle('Xdatanormalized.p')
-y = pd.read_pickle('Ydatanormalized.p')
-X = X.merge(y,how='left',on=['PMSector1','date_bom'])
-X = X.dropna(subset=['trt'])
-X = X[(abs(X['trt'])<0.20)]
-y = X['trt']
-y = np.log(1+y)
-X = X.drop(['trt'],axis=1)
-X_date_bom = pd.DataFrame(X['date_bom'],columns=['date_bom'])
-X=X[X.columns.difference(['date_bom','PMSector1'])]
+    test_X = X[X['date_bom']==stop]
+    test_sectors = test_X['PMSector1']
+    test_y = test_X['trt']
+    test_X = test_X.drop(['trt','date_bom','PMSector1'],axis=1)
 
-pipe_vals = list()
+    X = X[(abs(X['trt'])<0.20)]
+    y = X['trt']
+    y = np.log(1+y)
+    X = X.drop(['trt'],axis=1)
+    X.reset_index(inplace=True)
 
-## FEATURES
-pca = PCA()
-selection = SelectKBest()
-poly = PolynomialFeatures()
-combined_features = FeatureUnion([("pca", pca),
-                                 ("univ_select", selection),
-                                 ("poly",poly)])
+    X_date_bom = pd.DataFrame(X['date_bom'],columns=['date_bom'])
+    X=X[X.columns.difference(['date_bom','PMSector1','index'])]
+    index_vals = X_date_bom
 
-pipe_vals.append(("imputer",Imputer()))
-pipe_vals.append(("features",combined_features))
+    pca = PCA()
+    selection = SelectKBest()
+    poly = PolynomialFeatures()
+    combined_features = FeatureUnion([("pca", pca),
+                                     ("univ_select", selection),
+                                     ("poly",poly)])
 
-param_grid = dict(features__pca__n_components=[5,7],
-                  features__univ_select__k=[2,3],
-                  features__poly__degree=[2])
+    ada = AdaBoostRegressor()
+    rfr = RandomForestRegressor()
+    imputer = Imputer()
 
-##REGRESSORS
-ada = AdaBoostRegressor()
-pipe_vals.append(("ada",ada))
-param_grid['ada__n_estimators'] = [21,31,41]
+    pipeline = Pipeline(steps=[
+                            ('imputer',imputer),
+                            ('features',combined_features),
+                            ('regressor',ada)])
+    param_grid =[{
+    'features__pca__n_components':[5,8],
+    'features__univ_select__k':[2],
+    'features__poly__degree':[2],
+    'regressor':[rfr],
+    'regressor__n_estimators':[91,121,151],
+    'regressor__criterion':['mse'], 
+    'regressor__max_depth':[5,9],
+    'regressor__min_samples_split':[2]
+    },
+    {
+    'features__pca__n_components':[5,8],
+    'features__univ_select__k':[2],
+    'features__poly__degree':[2],
+    'regressor':[ada],
+    'regressor__n_estimators':[21,51,81]
+    }
+    ]
 
-## Cross Validation
-tscv = custom_timeseries_cv(index_vals = X_date_bom,lookback=12,start='2017-12-01',stop='2018-09-01')
+    tscv = custom_timeseries_cv(index_vals = X_date_bom,lookback=lookback,start=start,stop=stop)
 
-## Pipeline
-pipeline = Pipeline([
-            ("imputer",Imputer()),
-            ("features", combined_features),
-            ("ada", ada)
-            ])
-
-pipeline = Pipeline(pipe_vals)
-grid_search = GridSearchCV(pipeline, param_grid=param_grid, cv=tscv, verbose=10)
-grid_search.fit(X,y)
-
-print(grid_search.best_score_)
-print(grid_search.best_params_)
-print('total preds = ',sum(grid_search.predict(X)))
+    grid_search = GridSearchCV(pipeline, param_grid=param_grid, cv=tscv, verbose=1)
+    grid_search.fit(X,y)
+    print(grid_search.best_score_)
+    print(grid_search.best_params_)
+    preds = grid_search.predict(test_X)
+    final = pd.concat([pd.DataFrame(preds.reshape(-1)),test_y.reset_index(drop=True)],axis=1,ignore_index=True)
+    final = pd.concat([final,test_sectors.reset_index(drop=True)],axis=1,ignore_index=True)
+    final.columns = ['pred_trt','actual_trt','PMSector1']
+    return(final)
 
 class custom_timeseries_cv:
     def __init__(self, index_vals, n_splits=3, lookback = 12, start=None,stop=None):
@@ -488,8 +346,11 @@ class custom_timeseries_cv:
         self.index_vals = index_vals
         self.start = start
         self.stop = stop
+        
 
     def split(self, X, y, groups=None):
+        self.X = X
+        self.y = y
         pers=list(set(self.index_vals['date_bom']))
         pers.sort()
 
@@ -503,22 +364,21 @@ class custom_timeseries_cv:
         else:
             end = self.lookback+1
 
-        for q in np.arange(end,begin,-1):
+        for q in np.arange(end,begin+self.lookback-1,-1):
             test_q = pers[q]
             train_q = pers[q-self.lookback]
 
             # train = self.index_vals[(self.index_vals['date_bom']<test_q) & 
             #                             (self.index_vals['date_bom']>train_q)].index.values.astype(int)
             # test = self.index_vals[(self.index_vals['date_bom']==test_q)].index.values.astype(int)
-            train = X[(self.index_vals['date_bom']<test_q) & 
+            train = self.index_vals[(self.index_vals['date_bom']<test_q) & 
                                         (self.index_vals['date_bom']>train_q)].index.values.astype(int)
-            test = X[(self.index_vals['date_bom']==test_q)].index.values.astype(int)
-
-            train = X.iloc[[1,2,3,4,5,6,7]].index
-            test = X.iloc[[1,2,3,4,5,6,7]].index
+            test = self.index_vals[(self.index_vals['date_bom']==test_q)].index.values.astype(int)
+            # train = self.X.iloc[[1,2,3,4,5,6,7]].index.values.astype(int)
+            # test = self.X.iloc[[1,2,3,4,5,6,7]].index.values.astype(int)
             yield train,test          
 
-    def vals(self, X, y, groups=None):
+    def vals(self, groups=None):
         pers=list(set(self.index_vals['date_bom']))
         pers.sort()
 
@@ -539,12 +399,9 @@ class custom_timeseries_cv:
             # train = self.index_vals[(self.index_vals['date_bom']<test_q) & 
             #                             (self.index_vals['date_bom']>train_q)].index.values.astype(int)
             # test = self.index_vals[(self.index_vals['date_bom']==test_q)].index.values.astype(int)
-            train = X[(self.index_vals['date_bom']<test_q) & 
-                                        (self.index_vals['date_bom']>train_q)].index
-            test = X[(self.index_vals['date_bom']==test_q)].index
-
-            # train = X.iloc[[1,2,3,4,5,6,7]].index
-            # test = X.iloc[[1,2,3,4,5,6,7]].index
+            train = self.X[(self.index_vals['date_bom']<test_q) & 
+                                        (self.index_vals['date_bom']>train_q)].index.values.astype(int)
+            test = self.X[(self.index_vals['date_bom']==test_q)].index.values.astype(int)
         return(train,test)
 
     def get_n_splits(self, X, y, groups=None):
@@ -561,5 +418,5 @@ class custom_timeseries_cv:
         else:
             end = self.lookback+1
 
-        self.n_splits = len(np.arange(end,begin,-1))
+        self.n_splits = len(np.arange(end,begin+self.lookback-1,-1))
         return self.n_splits
