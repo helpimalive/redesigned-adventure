@@ -274,13 +274,15 @@ def forward_rounds(num_rounds,num_picks,lookback,start=None,stop=None):
 
 def make_preds(start,stop,lookback):
     X = pd.read_pickle('Xdatanormalized.p')
+    X = X[X['PMSector1']!='Hotel']
     y = pd.read_pickle('Ydatanormalized.p')
     X = X.merge(y,how='left',on=['PMSector1','date_bom'])
     X = X.dropna(subset=['trt'])
 
     test_X = X[X['date_bom']==stop]
     test_sectors = test_X['PMSector1']
-    test_y = test_X['trt']
+    test_y = np.log(1+test_X['trt'])
+    # this needs to be logged^^^
     test_X = test_X.drop(['trt','date_bom','PMSector1'],axis=1)
 
     X = X[(abs(X['trt'])<0.20)]
@@ -308,28 +310,31 @@ def make_preds(start,stop,lookback):
                             ('imputer',imputer),
                             ('features',combined_features),
                             ('regressor',ada)])
-    param_grid =[{
-    'features__pca__n_components':[5,8],
-    'features__univ_select__k':[2],
+    param_grid =[
+    {
+    'features__pca__n_components':[3,8],
+    'features__univ_select__k':[3],
     'features__poly__degree':[2],
     'regressor':[rfr],
-    'regressor__n_estimators':[91,121,151],
+    'regressor__n_estimators':[31,111,200],
     'regressor__criterion':['mse'], 
-    'regressor__max_depth':[5,9],
-    'regressor__min_samples_split':[2]
-    },
+    'regressor__max_depth':[3,4,5],
+    }
+    ,
     {
-    'features__pca__n_components':[5,8],
-    'features__univ_select__k':[2],
-    'features__poly__degree':[2],
+    'features__pca__n_components':[5,7,9],
+    'features__univ_select__k':[1,2],
+    'features__poly__degree':[1,2],
     'regressor':[ada],
     'regressor__n_estimators':[21,51,81]
     }
     ]
 
-    tscv = custom_timeseries_cv(index_vals = X_date_bom,lookback=lookback,start=start,stop=stop)
+    # tscv = custom_timeseries_cv(index_vals = X_date_bom,lookback=lookback,start=start,stop=stop)
 
-    grid_search = GridSearchCV(pipeline, param_grid=param_grid, cv=tscv, verbose=1)
+    tscv = custom_timeseries_within(index_vals = X_date_bom,lookback=lookback,test=stop)
+
+    grid_search = GridSearchCV(pipeline, param_grid=param_grid,scoring ='explained_variance', cv=tscv, verbose=1)
     grid_search.fit(X,y)
     print(grid_search.best_score_)
     print(grid_search.best_params_)
@@ -378,32 +383,6 @@ class custom_timeseries_cv:
             # test = self.X.iloc[[1,2,3,4,5,6,7]].index.values.astype(int)
             yield train,test          
 
-    def vals(self, groups=None):
-        pers=list(set(self.index_vals['date_bom']))
-        pers.sort()
-
-        if self.start:
-            begin = pers.index(pd.to_datetime(self.start))
-        else:
-            begin = pers.index(pd.to_datetime('2012-12-01'))
-
-        if self.stop:
-            end = pers.index(pd.to_datetime(self.stop))
-        else:
-            end = self.lookback+1
-
-        for q in np.arange(end,begin,-1):
-            test_q = pers[q]
-            train_q = pers[q-self.lookback]
-
-            # train = self.index_vals[(self.index_vals['date_bom']<test_q) & 
-            #                             (self.index_vals['date_bom']>train_q)].index.values.astype(int)
-            # test = self.index_vals[(self.index_vals['date_bom']==test_q)].index.values.astype(int)
-            train = self.X[(self.index_vals['date_bom']<test_q) & 
-                                        (self.index_vals['date_bom']>train_q)].index.values.astype(int)
-            test = self.X[(self.index_vals['date_bom']==test_q)].index.values.astype(int)
-        return(train,test)
-
     def get_n_splits(self, X, y, groups=None):
         pers=list(set(self.index_vals['date_bom']))
         pers.sort()
@@ -420,3 +399,88 @@ class custom_timeseries_cv:
 
         self.n_splits = len(np.arange(end,begin+self.lookback-1,-1))
         return self.n_splits
+
+
+class custom_timeseries_within:
+    def __init__(self, index_vals, lookback, test, n_splits=3):
+        self.n_splits = n_splits
+        self.lookback = lookback
+        self.index_vals = index_vals
+        self.test = test
+       
+
+    def split(self, X, y, groups=None):
+        self.X = X
+        self.y = y
+        pers=list(set(self.index_vals['date_bom']))
+        pers.sort()
+
+        begin = pers.index(pd.to_datetime(self.test))-self.lookback
+        end = pers.index(pd.to_datetime(self.test))
+
+        q = pers.index(pd.to_datetime(self.test))
+        test_q = pd.to_datetime(self.test)
+        for l in np.arange(3,self.lookback+1,3):
+            train_q = pers[q-l]
+            train = self.index_vals[(self.index_vals['date_bom']<test_q) & 
+                                        (self.index_vals['date_bom']>=train_q)].index.values.astype(int)
+            test = self.index_vals[(self.index_vals['date_bom']==test_q)].index.values.astype(int)
+            yield train,test          
+
+    def get_n_splits(self, X, y, groups=None):
+        splits = len(np.arange(3,self.lookback+1,3))
+        return splits
+
+
+
+
+# lookback = 12
+# X = pd.read_pickle('Xdatanormalized.p')
+# # X = X[X['PMSector1']!='Hotel']
+# y = pd.read_pickle('Ydatanormalized.p')
+# X = X.merge(y,how='left',on=['PMSector1','date_bom'])
+# X = X.dropna(subset=['trt'])
+
+# test_X = X[X['date_bom']==stop]
+# test_sectors = test_X['PMSector1']
+# test_y = test_X['trt']
+# test_X = test_X.drop(['trt','date_bom','PMSector1'],axis=1)
+
+# X = X[(abs(X['trt'])<0.20)]
+# y = X['trt']
+# y = np.log(1+y)
+# X = X.drop(['trt'],axis=1)
+# X.reset_index(inplace=True)
+
+# X_date_bom = pd.DataFrame(X['date_bom'],columns=['date_bom'])
+
+# start = '2018-01-01'
+# start = '2017-01-01'
+
+# tscv1 = custom_timeseries_cv(index_vals = X_date_bom,lookback=lookback,start=start,stop=stop)
+
+# start = '2018-01-01'
+# tscv2 = custom_timeseries_within(index_vals = X_date_bom,lookback=lookback,test=start)
+
+# a = tscv1.split(X,y)
+# tscv1.get_n_splits(X,y)
+# for x in a:
+#     print(len(x[0]))
+#     print(len(x[1]))
+#     # print("\n Train")
+#     # print(X_date_bom.iloc[x[0],0].unique())
+#     print("\n Test")
+#     # print(X_date_bom.iloc[x[1],0].unique())
+#     print(len(X_date_bom.iloc[x[1]]))
+
+# b = tscv2.split(X,y)
+# tscv2.get_n_splits(X,y)
+
+# for x in b:
+#     # print(len(x[0]))
+#     # print(len(x[1]))
+#     # print("\n Train")
+#     # print(X_date_bom.iloc[x[0],0].unique())
+#     print("\n Test")
+#     # print(X_date_bom.iloc[x[1],0].unique())
+#     print(len(X_date_bom.iloc[x[1]]))
