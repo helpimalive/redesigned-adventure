@@ -11,6 +11,8 @@ import numpy as np
 import pypyodbc as odbc
 from scipy import stats
 
+import sklearn as skl
+from sklearn.metrics.scorer import make_scorer
 from sklearn.pipeline import Pipeline, FeatureUnion
 from sklearn.model_selection import GridSearchCV
 from sklearn.svm import SVC
@@ -273,70 +275,72 @@ def forward_rounds(num_rounds,num_picks,lookback,start=None,stop=None):
 
 
 def make_preds(start,stop,lookback):
-X = pd.read_pickle('Xdatanormalized.p')
-X = X[X['PMSector1']!='Hotel']
-y = pd.read_pickle('Ydatanormalized.p')
-X = X.merge(y,how='left',on=['PMSector1','date_bom'])
-X = X.dropna(subset=['trt'])
+    X = pd.read_pickle('Xdatanormalized.p')
+    X = X.drop(['ebitdamultiple1','pctaffochange1','pctaffochange2','pctaffochange3','pctaffochange4'],axis=1)
+    X = X[X['PMSector1']!='Hotel']
+    y = pd.read_pickle('Ydatanormalized.p')
+    X = X.merge(y,how='left',on=['PMSector1','date_bom'])
+    X = X.dropna(subset=['trt'])
 
-test_X = X[X['date_bom']==stop]
-test_sectors = test_X['PMSector1']
-test_y = np.log(1+test_X['trt'])
-# this needs to be logged^^^
-test_X = test_X.drop(['trt','date_bom','PMSector1'],axis=1)
+    test_X = X[X['date_bom']==stop]
+    test_sectors = test_X['PMSector1']
+    test_y = test_X['trt']
+    test_X = test_X.drop(['trt','date_bom','PMSector1'],axis=1)
 
-X = X[(abs(X['trt'])<0.20)]
-y = X['trt']
-y = np.log(1+y)
-X = X.drop(['trt'],axis=1)
-X.reset_index(inplace=True)
+    X = X[(abs(X['trt'])<0.20)]
+    y = X['trt']
+    y = np.log(1+y)
+    X = X.drop(['trt'],axis=1)
+    X.reset_index(inplace=True)
 
-X_date_bom = pd.DataFrame(X['date_bom'],columns=['date_bom'])
-X=X[X.columns.difference(['date_bom','PMSector1','index'])]
-index_vals = X_date_bom
+    X_date_bom = pd.DataFrame(X['date_bom'],columns=['date_bom'])
+    X=X[X.columns.difference(['date_bom','PMSector1','index'])]
+    index_vals = X_date_bom
 
-pca = PCA()
-selection = SelectKBest()
-poly = PolynomialFeatures()
-combined_features = FeatureUnion([("pca", pca),
-                                 ("univ_select", selection),
-                                 ("poly",poly)])
+    pca = PCA()
+    selection = SelectKBest()
+    poly = PolynomialFeatures()
+    combined_features = FeatureUnion([("pca", pca),
+                                     ("univ_select", selection),
+                                     ("poly",poly)])
 
-ada = AdaBoostRegressor()
-rfr = RandomForestRegressor()
-imputer = Imputer()
+    ada = AdaBoostRegressor()
+    rfr = RandomForestRegressor()
+    imputer = Imputer()
 
-pipeline = Pipeline(steps=[
-                        ('imputer',imputer),
-                        ('features',combined_features),
-                        ('regressor',ada)])
-param_grid =[
-{
-'features__pca__n_components':[3,8],
-'features__univ_select__k':[3],
-'features__poly__degree':[2],
-'regressor':[rfr],
-'regressor__n_estimators':[31,111,200],
-'regressor__criterion':['mse'], 
-'regressor__max_depth':[3,4,5],
-}
-,
-{
-'features__pca__n_components':[5,7,9],
-'features__univ_select__k':[1,2],
-'features__poly__degree':[1,2],
-'regressor':[ada],
-'regressor__n_estimators':[21,51,81]
-}
-]
+    pipeline = Pipeline(steps=[
+                            ('imputer',imputer),
+                            ('features',combined_features),
+                            ('regressor',ada)])
+    param_grid =[
+    {
+    'features__pca__n_components':[5],
+    'features__univ_select__k':[2],
+    'features__poly__degree':[1],
+    'regressor':[rfr],
+    'regressor__n_estimators':[400],
+    'regressor__criterion':['mse'], 
+    'regressor__min_samples_leaf':[1,2],
+    'regressor__max_depth':[3,5,7],
+    }
+    ,
+    {
+    'features__pca__n_components':[5],
+    'features__univ_select__k':[2],
+    'features__poly__degree':[1],
+    'regressor':[ada],
+    'regressor__learning_rate':[1,0.1],
+    'regressor__n_estimators':[400]
+    }
+    ]
 
-tscv = custom_timeseries_within(index_vals = X_date_bom,lookback=lookback,test=stop)
+    tscv = custom_timeseries_within(index_vals = X_date_bom,lookback=lookback,test=stop)
 
-grid_search = GridSearchCV(pipeline, param_grid=param_grid,scoring ='explained_variance', cv=tscv, verbose=1)
-grid_search.fit(X,y)
-print(grid_search.best_score_)
-print(grid_search.best_params_)
-preds = grid_search.predict(test_X)
+    grid_search = GridSearchCV(pipeline, param_grid=param_grid,scoring =my_scorer, cv=tscv, verbose=1)
+    grid_search.fit(X,y)
+    print(grid_search.best_score_)
+    print(grid_search.best_params_)
+    preds = grid_search.predict(test_X)
     final = pd.concat([pd.DataFrame(preds.reshape(-1)),test_y.reset_index(drop=True)],axis=1,ignore_index=True)
     final = pd.concat([final,test_sectors.reset_index(drop=True)],axis=1,ignore_index=True)
     final.columns = ['pred_trt','actual_trt','PMSector1']
@@ -373,6 +377,30 @@ class custom_timeseries_within:
         splits = len(np.arange(3,self.lookback+1,3))
         return splits
 
-
 def custom_loss_func(y_true, y_pred):
-    pass
+    df = pd.concat([pd.DataFrame(y_true).reset_index(drop=True),pd.DataFrame(y_pred)],ignore_index=True,axis=1)
+    df.columns = ['true','pred']
+
+    df['true_rank'] = df['true'].rank()
+    df['pred_rank'] = df['pred'].rank()
+    r2 = skl.metrics.r2_score(df['true_rank'],df['pred_rank'])
+    ranks = list(set(df['pred_rank']))
+    ranks.sort()
+    lr = len(ranks)
+    spread_1 = np.mean(df[df['pred_rank']==(max(df['pred_rank']))]['true']) - np.mean(df[df['pred_rank']==(min(df['pred_rank']))]['true'])
+    # spread_2 = np.mean(df[df['pred_rank']==ranks[lr-1]]['true']) -\
+    #             np.mean(df[df['pred_rank']==ranks[1]]['true'])
+    # spread_3 = np.mean(df[df['pred_rank']==ranks[lr-2]]['true']) -\
+    #             np.mean(df[df['pred_rank']==ranks[2]]['true'])
+
+    spread_1
+    return(r2)
+
+my_scorer = make_scorer(custom_loss_func,greater_is_better=True)
+
+a = forward_rounds(1,1,12,'2016-11-01','2018-01-01')
+b = forward_rounds(1,1,12,'2016-11-01','2018-01-01')
+c = forward_rounds(1,1,12,'2016-11-01','2018-01-01')
+d = forward_rounds(1,1,12,'2016-11-01','2018-01-01')
+e = forward_rounds(1,1,12,'2016-11-01','2018-01-01')
+f = forward_rounds(1,1,12,'2016-11-01','2018-01-01')
